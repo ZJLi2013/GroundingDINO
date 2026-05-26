@@ -15,6 +15,7 @@
 # ------------------------------------------------------------------------------------------------
 
 import math
+import os
 import warnings
 from typing import Optional
 
@@ -136,8 +137,13 @@ def multi_scale_deformable_attn_pytorch(
     return output.transpose(1, 2).contiguous()
 
 
-def _is_rocm_tensor(tensor: torch.Tensor) -> bool:
-    return tensor.is_cuda and torch.version.hip is not None
+def _force_msda_fallback() -> bool:
+    return os.environ.get("GROUNDINGDINO_MSDA_FORCE_FALLBACK", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _multi_scale_deformable_attn_fallback(
@@ -358,7 +364,7 @@ class MultiScaleDeformableAttention(nn.Module):
             torch.cuda.is_available()
             and value.is_cuda
             and _C_AVAILABLE
-            and not _is_rocm_tensor(value)
+            and not _force_msda_fallback()
         )
         if use_custom_kernel:
             halffloat = False
