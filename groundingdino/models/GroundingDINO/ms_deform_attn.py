@@ -27,8 +27,11 @@ from torch.nn.init import constant_, xavier_uniform_
 
 try:
     from groundingdino import _C
-except:
-    warnings.warn("Failed to load custom C++ ops. Running on CPU mode Only!")
+    _C_AVAILABLE = True
+except Exception:
+    _C = None
+    _C_AVAILABLE = False
+    warnings.warn("Failed to load custom C++ ops. Falling back to the PyTorch implementation.")
 
 
 # helpers
@@ -131,6 +134,30 @@ def multi_scale_deformable_attn_pytorch(
         .view(bs, num_heads * embed_dims, num_queries)
     )
     return output.transpose(1, 2).contiguous()
+
+
+def _is_rocm_tensor(tensor: torch.Tensor) -> bool:
+    return tensor.is_cuda and torch.version.hip is not None
+
+
+def _multi_scale_deformable_attn_fallback(
+    value: torch.Tensor,
+    value_spatial_shapes: torch.Tensor,
+    sampling_locations: torch.Tensor,
+    attention_weights: torch.Tensor,
+) -> torch.Tensor:
+    output_dtype = value.dtype
+    if output_dtype in (torch.float16, torch.bfloat16):
+        value = value.float()
+        sampling_locations = sampling_locations.float()
+        attention_weights = attention_weights.float()
+
+    output = multi_scale_deformable_attn_pytorch(
+        value, value_spatial_shapes, sampling_locations, attention_weights
+    )
+    if output.dtype != output_dtype:
+        output = output.to(output_dtype)
+    return output
 
 
 class MultiScaleDeformableAttention(nn.Module):
@@ -327,7 +354,13 @@ class MultiScaleDeformableAttention(nn.Module):
                 )
             )
     
-        if torch.cuda.is_available() and value.is_cuda:
+        use_custom_kernel = (
+            torch.cuda.is_available()
+            and value.is_cuda
+            and _C_AVAILABLE
+            and not _is_rocm_tensor(value)
+        )
+        if use_custom_kernel:
             halffloat = False
             if value.dtype == torch.float16:
                 halffloat = True
@@ -347,7 +380,7 @@ class MultiScaleDeformableAttention(nn.Module):
             if halffloat:
                 output = output.half()
         else:
-            output = multi_scale_deformable_attn_pytorch(
+            output = _multi_scale_deformable_attn_fallback(
                 value, spatial_shapes, sampling_locations, attention_weights
             )
 
